@@ -1,0 +1,865 @@
+{
+ "name": "AgriPilot - AI Farm Automation",
+ "nodes": [
+  {
+   "id": "note-overview",
+   "name": "Note Overview",
+   "type": "n8n-nodes-base.stickyNote",
+   "typeVersion": 1,
+   "position": [
+    -300,
+    -380
+   ],
+   "parameters": {
+    "content": "## AgriPilot - AI Farm Automation\nLane 1: Daily 6AM weather -> irrigation plan + weather impact + pest risk -> Telegram + Sheet log\nLane 2: Soil analysis webhook -> fertilizer advice\nLane 3: Harvest log webhook -> Sheet\nLane 4: Weekly yield prediction from harvest history\nLane 5: Daily equipment maintenance reminders\nSetup: edit 'Farm Config', add credentials (OpenAI, Telegram, Google Sheets), replace YOUR_* values.\nWeather data: Open-Meteo (free, no API key).",
+    "width": 620,
+    "height": 230,
+    "color": 4
+   }
+  },
+  {
+   "id": "openai-model",
+   "name": "OpenAI Model",
+   "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+   "typeVersion": 1.2,
+   "position": [
+    400,
+    -120
+   ],
+   "parameters": {
+    "model": {
+     "__rl": true,
+     "mode": "list",
+     "value": "gpt-4o-mini"
+    },
+    "options": {
+     "temperature": 0.2
+    }
+   }
+  },
+  {
+   "id": "daily-6am",
+   "name": "Daily 6AM",
+   "type": "n8n-nodes-base.scheduleTrigger",
+   "typeVersion": 1.2,
+   "position": [
+    0,
+    0
+   ],
+   "parameters": {
+    "rule": {
+     "interval": [
+      {
+       "field": "cronExpression",
+       "expression": "0 6 * * *"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "farm-config",
+   "name": "Farm Config",
+   "type": "n8n-nodes-base.set",
+   "typeVersion": 3.4,
+   "position": [
+    200,
+    0
+   ],
+   "parameters": {
+    "options": {},
+    "assignments": {
+     "assignments": [
+      {
+       "id": "c1",
+       "name": "lat",
+       "type": "number",
+       "value": 0
+      },
+      {
+       "id": "c2",
+       "name": "lon",
+       "type": "number",
+       "value": 0
+      },
+      {
+       "id": "c3",
+       "name": "crop",
+       "type": "string",
+       "value": "tomato"
+      },
+      {
+       "id": "c4",
+       "name": "growth_stage",
+       "type": "string",
+       "value": "flowering"
+      },
+      {
+       "id": "c5",
+       "name": "soil_type",
+       "type": "string",
+       "value": "loam"
+      },
+      {
+       "id": "c6",
+       "name": "area_m2",
+       "type": "number",
+       "value": 1000
+      },
+      {
+       "id": "c7",
+       "name": "irrigation_method",
+       "type": "string",
+       "value": "drip"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "get-weather-(open-meteo)",
+   "name": "Get Weather (Open-Meteo)",
+   "type": "n8n-nodes-base.httpRequest",
+   "typeVersion": 4.2,
+   "position": [
+    420,
+    0
+   ],
+   "parameters": {
+    "url": "https://api.open-meteo.com/v1/forecast",
+    "sendQuery": true,
+    "queryParameters": {
+     "parameters": [
+      {
+       "name": "latitude",
+       "value": "={{ $json.lat }}"
+      },
+      {
+       "name": "longitude",
+       "value": "={{ $json.lon }}"
+      },
+      {
+       "name": "daily",
+       "value": "temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max,et0_fao_evapotranspiration,wind_speed_10m_max"
+      },
+      {
+       "name": "hourly",
+       "value": "relative_humidity_2m"
+      },
+      {
+       "name": "forecast_days",
+       "value": "3"
+      },
+      {
+       "name": "timezone",
+       "value": "auto"
+      }
+     ]
+    },
+    "options": {}
+   }
+  },
+  {
+   "id": "compute-farm-metrics",
+   "name": "Compute Farm Metrics",
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    640,
+    0
+   ],
+   "parameters": {
+    "jsCode": "const w=$json; const cfg=$('Farm Config').first().json;\nconst d=w.daily; const h=(w.hourly.relative_humidity_2m||[]).slice(0,48);\nconst avgHum=h.reduce((a,b)=>a+b,0)/(h.length||1);\nconst rain48=(d.precipitation_sum[0]||0)+(d.precipitation_sum[1]||0);\nconst et0=d.et0_fao_evapotranspiration[0]||0;\nconst tmax=Math.max(...d.temperature_2m_max), tmin=Math.min(...d.temperature_2m_min);\nconst wind=Math.max(...d.wind_speed_10m_max);\nlet pest=0; if(avgHum>80)pest+=2; else if(avgHum>70)pest+=1;\nif(tmax>=22&&tmax<=32)pest+=2; if(rain48>5)pest+=1;\nconst water_deficit=Math.max(0,et0-rain48/2);\nreturn [{json:{cfg,metrics:{rain_48h_mm:+rain48.toFixed(1),et0_today_mm:+et0.toFixed(1),water_deficit_mm:+water_deficit.toFixed(1),tmax,tmin,max_wind_kmh:wind,avg_humidity_48h:+avgHum.toFixed(0),pest_risk_score:pest,heat_stress:tmax>=35,frost_risk:tmin<=2,heavy_rain:rain48>=30,rain_prob_max:Math.max(...d.precipitation_probability_max)},daily:d.time.map((t,i)=>({date:t,tmax:d.temperature_2m_max[i],tmin:d.temperature_2m_min[i],rain:d.precipitation_sum[i]}))}}];"
+   }
+  },
+  {
+   "id": "farm-advisor-ai",
+   "name": "Farm Advisor AI",
+   "type": "@n8n/n8n-nodes-langchain.chainLlm",
+   "typeVersion": 1.5,
+   "position": [
+    860,
+    0
+   ],
+   "parameters": {
+    "promptType": "define",
+    "text": "=Farm: crop={{ $json.cfg.crop }}, stage={{ $json.cfg.growth_stage }}, soil={{ $json.cfg.soil_type }}, area={{ $json.cfg.area_m2 }} m2, irrigation={{ $json.cfg.irrigation_method }}\nMetrics: {{ JSON.stringify($json.metrics) }}\n3-day forecast: {{ JSON.stringify($json.daily) }}",
+    "hasOutputParser": true,
+    "messages": {
+     "messageValues": [
+      {
+       "message": "You are an agronomist. From the weather metrics decide: (1) irrigation: needed (boolean), liters_per_m2, best_time, reason - use water_deficit_mm and rain_48h_mm, skip irrigation if heavy rain expected; (2) weather_risks: list of concrete risks for this crop and stage (heat, frost, wind, flooding); (3) pest: risk_level low/medium/high from pest_risk_score and humidity, likely threats, preventive actions; (4) summary: 2 sentences; (5) alert: true only if urgent action is needed today. Be specific, no generic advice."
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "advisor-parser",
+   "name": "Advisor Parser",
+   "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+   "typeVersion": 1.2,
+   "position": [
+    960,
+    200
+   ],
+   "parameters": {
+    "schemaType": "manual",
+    "inputSchema": "{\"type\": \"object\", \"properties\": {\"irrigation\": {\"type\": \"object\", \"properties\": {\"needed\": {\"type\": \"boolean\"}, \"liters_per_m2\": {\"type\": \"number\"}, \"best_time\": {\"type\": \"string\"}, \"reason\": {\"type\": \"string\"}}}, \"weather_risks\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"pest\": {\"type\": \"object\", \"properties\": {\"risk_level\": {\"type\": \"string\"}, \"threats\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"actions\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}}}, \"summary\": {\"type\": \"string\"}, \"alert\": {\"type\": \"boolean\"}}, \"required\": [\"irrigation\", \"pest\", \"summary\", \"alert\"]}"
+   }
+  },
+  {
+   "id": "format-report",
+   "name": "Format Report",
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    1200,
+    0
+   ],
+   "parameters": {
+    "jsCode": "const o=$json.output; const m=$('Compute Farm Metrics').first().json.metrics; const c=$('Compute Farm Metrics').first().json.cfg;\nconst i=o.irrigation||{};\nconst msg=`${o.alert?'🚨 ':'🌱 '}Farm report - ${c.crop} (${c.growth_stage})\\n\\n💧 Irrigation: ${i.needed?`YES ${i.liters_per_m2} L/m2, ${i.best_time}`:'Not needed'}\\n${i.reason||''}\\n\\n⛅ Weather: ${m.tmin}-${m.tmax}C, rain 48h ${m.rain_48h_mm} mm, humidity ${m.avg_humidity_48h}%\\n${(o.weather_risks||[]).map(r=>'- '+r).join('\\n')}\\n\\n🐛 Pest risk: ${(o.pest.risk_level||'').toUpperCase()}\\n${(o.pest.actions||[]).map(r=>'- '+r).join('\\n')}\\n\\n${o.summary}`;\nreturn [{json:{message:msg,alert:o.alert,date:new Date().toISOString().slice(0,10),crop:c.crop,irrigation_needed:i.needed,liters_per_m2:i.liters_per_m2,pest_risk:o.pest.risk_level,rain_48h:m.rain_48h_mm,tmax:m.tmax,summary:o.summary}}];"
+   }
+  },
+  {
+   "id": "send-daily-report",
+   "name": "Send Daily Report",
+   "type": "n8n-nodes-base.telegram",
+   "typeVersion": 1.2,
+   "position": [
+    1420,
+    -80
+   ],
+   "parameters": {
+    "chatId": "YOUR_TELEGRAM_CHAT_ID",
+    "text": "={{ $json.message }}",
+    "additionalFields": {
+     "appendAttribution": false
+    }
+   }
+  },
+  {
+   "id": "log-daily-report",
+   "name": "Log Daily Report",
+   "type": "n8n-nodes-base.googleSheets",
+   "typeVersion": 4.5,
+   "position": [
+    1420,
+    100
+   ],
+   "parameters": {
+    "operation": "append",
+    "documentId": {
+     "__rl": true,
+     "mode": "id",
+     "value": "YOUR_SHEET_ID"
+    },
+    "sheetName": {
+     "__rl": true,
+     "mode": "name",
+     "value": "daily_log"
+    },
+    "columns": {
+     "mappingMode": "defineBelow",
+     "value": {
+      "date": "={{ $json.date }}",
+      "crop": "={{ $json.crop }}",
+      "irrigation_needed": "={{ $json.irrigation_needed }}",
+      "liters_per_m2": "={{ $json.liters_per_m2 }}",
+      "pest_risk": "={{ $json.pest_risk }}",
+      "rain_48h": "={{ $json.rain_48h }}",
+      "tmax": "={{ $json.tmax }}",
+      "summary": "={{ $json.summary }}"
+     }
+    },
+    "options": {}
+   }
+  },
+  {
+   "id": "soil-webhook",
+   "name": "Soil Webhook",
+   "type": "n8n-nodes-base.webhook",
+   "typeVersion": 2,
+   "position": [
+    0,
+    400
+   ],
+   "parameters": {
+    "httpMethod": "POST",
+    "path": "soil-analysis",
+    "responseMode": "responseNode"
+   }
+  },
+  {
+   "id": "soil-advisor-ai",
+   "name": "Soil Advisor AI",
+   "type": "@n8n/n8n-nodes-langchain.chainLlm",
+   "typeVersion": 1.5,
+   "position": [
+    220,
+    400
+   ],
+   "parameters": {
+    "promptType": "define",
+    "text": "=Soil test: {{ JSON.stringify($json.body) }}",
+    "hasOutputParser": true,
+    "messages": {
+     "messageValues": [
+      {
+       "message": "You are a soil scientist. Input JSON has crop, pH, N, P, K (ppm or mg/kg), organic_matter, area_m2. Compare to typical optimal ranges for the crop. Return: status per nutrient (low/ok/high), fertilizer_plan (product, kg_per_ha, timing), ph_advice, warnings. If data is missing, say which value is missing instead of guessing."
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "soil-parser",
+   "name": "Soil Parser",
+   "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+   "typeVersion": 1.2,
+   "position": [
+    320,
+    600
+   ],
+   "parameters": {
+    "schemaType": "manual",
+    "inputSchema": "{\"type\": \"object\", \"properties\": {\"nutrient_status\": {\"type\": \"object\"}, \"fertilizer_plan\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {\"product\": {\"type\": \"string\"}, \"kg_per_ha\": {\"type\": \"number\"}, \"timing\": {\"type\": \"string\"}}}}, \"ph_advice\": {\"type\": \"string\"}, \"warnings\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}}, \"required\": [\"nutrient_status\", \"fertilizer_plan\"]}"
+   }
+  },
+  {
+   "id": "log-soil-result",
+   "name": "Log Soil Result",
+   "type": "n8n-nodes-base.googleSheets",
+   "typeVersion": 4.5,
+   "position": [
+    460,
+    400
+   ],
+   "parameters": {
+    "operation": "append",
+    "documentId": {
+     "__rl": true,
+     "mode": "id",
+     "value": "YOUR_SHEET_ID"
+    },
+    "sheetName": {
+     "__rl": true,
+     "mode": "name",
+     "value": "soil_log"
+    },
+    "columns": {
+     "mappingMode": "defineBelow",
+     "value": {
+      "date": "={{ $now.toISODate() }}",
+      "crop": "={{ $('Soil Webhook').item.json.body.crop }}",
+      "input": "={{ JSON.stringify($('Soil Webhook').item.json.body) }}",
+      "advice": "={{ JSON.stringify($json.output) }}"
+     }
+    },
+    "options": {}
+   }
+  },
+  {
+   "id": "respond-soil",
+   "name": "Respond Soil",
+   "type": "n8n-nodes-base.respondToWebhook",
+   "typeVersion": 1.1,
+   "position": [
+    680,
+    400
+   ],
+   "parameters": {
+    "respondWith": "json",
+    "responseBody": "={{ $('Soil Advisor AI').item.json.output }}"
+   }
+  },
+  {
+   "id": "harvest-webhook",
+   "name": "Harvest Webhook",
+   "type": "n8n-nodes-base.webhook",
+   "typeVersion": 2,
+   "position": [
+    0,
+    800
+   ],
+   "parameters": {
+    "httpMethod": "POST",
+    "path": "harvest-log",
+    "responseMode": "responseNode"
+   }
+  },
+  {
+   "id": "append-harvest",
+   "name": "Append Harvest",
+   "type": "n8n-nodes-base.googleSheets",
+   "typeVersion": 4.5,
+   "position": [
+    220,
+    800
+   ],
+   "parameters": {
+    "operation": "append",
+    "documentId": {
+     "__rl": true,
+     "mode": "id",
+     "value": "YOUR_SHEET_ID"
+    },
+    "sheetName": {
+     "__rl": true,
+     "mode": "name",
+     "value": "harvest"
+    },
+    "columns": {
+     "mappingMode": "defineBelow",
+     "value": {
+      "date": "={{ $json.body.date || $now.toISODate() }}",
+      "crop": "={{ $json.body.crop }}",
+      "field": "={{ $json.body.field }}",
+      "quantity_kg": "={{ $json.body.quantity_kg }}",
+      "area_m2": "={{ $json.body.area_m2 }}",
+      "quality": "={{ $json.body.quality }}",
+      "notes": "={{ $json.body.notes }}"
+     }
+    },
+    "options": {}
+   }
+  },
+  {
+   "id": "respond-harvest",
+   "name": "Respond Harvest",
+   "type": "n8n-nodes-base.respondToWebhook",
+   "typeVersion": 1.1,
+   "position": [
+    440,
+    800
+   ],
+   "parameters": {
+    "respondWith": "json",
+    "responseBody": "={{ { status: 'logged', crop: $json.crop, quantity_kg: $json.quantity_kg } }}"
+   }
+  },
+  {
+   "id": "weekly-monday-7am",
+   "name": "Weekly Monday 7AM",
+   "type": "n8n-nodes-base.scheduleTrigger",
+   "typeVersion": 1.2,
+   "position": [
+    0,
+    1200
+   ],
+   "parameters": {
+    "rule": {
+     "interval": [
+      {
+       "field": "cronExpression",
+       "expression": "0 7 * * 1"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "read-harvest-history",
+   "name": "Read Harvest History",
+   "type": "n8n-nodes-base.googleSheets",
+   "typeVersion": 4.5,
+   "position": [
+    220,
+    1200
+   ],
+   "parameters": {
+    "operation": "getAll",
+    "documentId": {
+     "__rl": true,
+     "mode": "id",
+     "value": "YOUR_SHEET_ID"
+    },
+    "sheetName": {
+     "__rl": true,
+     "mode": "name",
+     "value": "harvest"
+    },
+    "returnAll": true,
+    "options": {}
+   }
+  },
+  {
+   "id": "aggregate-yield-stats",
+   "name": "Aggregate Yield Stats",
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    440,
+    1200
+   ],
+   "parameters": {
+    "jsCode": "const by={};\nfor(const i of $input.all()){const r=i.json;const k=r.crop||'unknown';by[k]=by[k]||{crop:k,harvests:0,total_kg:0,total_m2:0,months:{}};\nconst q=parseFloat(r.quantity_kg)||0,a=parseFloat(r.area_m2)||0;by[k].harvests++;by[k].total_kg+=q;by[k].total_m2+=a;\nconst mo=String(r.date||'').slice(0,7);by[k].months[mo]=(by[k].months[mo]||0)+q;}\nreturn [{json:{stats:Object.values(by).map(s=>({...s,kg_per_m2:s.total_m2?+(s.total_kg/s.total_m2).toFixed(2):null}))}}];"
+   }
+  },
+  {
+   "id": "yield-predictor-ai",
+   "name": "Yield Predictor AI",
+   "type": "@n8n/n8n-nodes-langchain.chainLlm",
+   "typeVersion": 1.5,
+   "position": [
+    660,
+    1200
+   ],
+   "parameters": {
+    "promptType": "define",
+    "text": "=Harvest history stats: {{ JSON.stringify($json.stats) }}\nFarm config: {{ JSON.stringify($('Farm Config').first().json) }}",
+    "messages": {
+     "messageValues": [
+      {
+       "message": "You are a farm analyst. Using the harvest history, estimate the expected yield (kg) for the next harvest of each crop, with a low-high range and confidence (low/medium/high based on how many harvests exist). Explain the trend in 2 lines. If there are fewer than 3 harvests, say the estimate is weak. Never invent data. Format as a short Telegram message."
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "send-yield-forecast",
+   "name": "Send Yield Forecast",
+   "type": "n8n-nodes-base.telegram",
+   "typeVersion": 1.2,
+   "position": [
+    960,
+    1200
+   ],
+   "parameters": {
+    "chatId": "YOUR_TELEGRAM_CHAT_ID",
+    "text": "=📈 Weekly yield forecast\n\n{{ $json.text }}",
+    "additionalFields": {
+     "appendAttribution": false
+    }
+   }
+  },
+  {
+   "id": "daily-7am-equipment",
+   "name": "Daily 7AM Equipment",
+   "type": "n8n-nodes-base.scheduleTrigger",
+   "typeVersion": 1.2,
+   "position": [
+    0,
+    1600
+   ],
+   "parameters": {
+    "rule": {
+     "interval": [
+      {
+       "field": "cronExpression",
+       "expression": "0 7 * * *"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "read-equipment",
+   "name": "Read Equipment",
+   "type": "n8n-nodes-base.googleSheets",
+   "typeVersion": 4.5,
+   "position": [
+    220,
+    1600
+   ],
+   "parameters": {
+    "operation": "getAll",
+    "documentId": {
+     "__rl": true,
+     "mode": "id",
+     "value": "YOUR_SHEET_ID"
+    },
+    "sheetName": {
+     "__rl": true,
+     "mode": "name",
+     "value": "equipment"
+    },
+    "returnAll": true,
+    "options": {}
+   }
+  },
+  {
+   "id": "find-due-maintenance",
+   "name": "Find Due Maintenance",
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    440,
+    1600
+   ],
+   "parameters": {
+    "jsCode": "const today=new Date(); const due=[];\nfor(const i of $input.all()){const r=i.json; const last=new Date(r.last_service_date); const every=parseInt(r.interval_days)||90;\nif(isNaN(last))continue; const next=new Date(last.getTime()+every*864e5); const left=Math.ceil((next-today)/864e5);\nif(left<=7)due.push({equipment:r.equipment,days_left:left,next:next.toISOString().slice(0,10)});}\nif(!due.length)return [];\ndue.sort((a,b)=>a.days_left-b.days_left);\nreturn [{json:{message:'🔧 Maintenance due\\n\\n'+due.map(d=>`- ${d.equipment}: ${d.days_left<0?Math.abs(d.days_left)+' days OVERDUE':d.days_left+' days left'} (${d.next})`).join('\\n')}}];"
+   }
+  },
+  {
+   "id": "send-maintenance-reminder",
+   "name": "Send Maintenance Reminder",
+   "type": "n8n-nodes-base.telegram",
+   "typeVersion": 1.2,
+   "position": [
+    660,
+    1600
+   ],
+   "parameters": {
+    "chatId": "YOUR_TELEGRAM_CHAT_ID",
+    "text": "={{ $json.message }}",
+    "additionalFields": {
+     "appendAttribution": false
+    }
+   }
+  }
+ ],
+ "connections": {
+  "Daily 6AM": {
+   "main": [
+    [
+     {
+      "node": "Farm Config",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Farm Config": {
+   "main": [
+    [
+     {
+      "node": "Get Weather (Open-Meteo)",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Get Weather (Open-Meteo)": {
+   "main": [
+    [
+     {
+      "node": "Compute Farm Metrics",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Compute Farm Metrics": {
+   "main": [
+    [
+     {
+      "node": "Farm Advisor AI",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Farm Advisor AI": {
+   "main": [
+    [
+     {
+      "node": "Format Report",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Format Report": {
+   "main": [
+    [
+     {
+      "node": "Send Daily Report",
+      "type": "main",
+      "index": 0
+     },
+     {
+      "node": "Log Daily Report",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "OpenAI Model": {
+   "ai_languageModel": [
+    [
+     {
+      "node": "Farm Advisor AI",
+      "type": "ai_languageModel",
+      "index": 0
+     },
+     {
+      "node": "Soil Advisor AI",
+      "type": "ai_languageModel",
+      "index": 0
+     },
+     {
+      "node": "Yield Predictor AI",
+      "type": "ai_languageModel",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Advisor Parser": {
+   "ai_outputParser": [
+    [
+     {
+      "node": "Farm Advisor AI",
+      "type": "ai_outputParser",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Soil Webhook": {
+   "main": [
+    [
+     {
+      "node": "Soil Advisor AI",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Soil Advisor AI": {
+   "main": [
+    [
+     {
+      "node": "Log Soil Result",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Log Soil Result": {
+   "main": [
+    [
+     {
+      "node": "Respond Soil",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Soil Parser": {
+   "ai_outputParser": [
+    [
+     {
+      "node": "Soil Advisor AI",
+      "type": "ai_outputParser",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Harvest Webhook": {
+   "main": [
+    [
+     {
+      "node": "Append Harvest",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Append Harvest": {
+   "main": [
+    [
+     {
+      "node": "Respond Harvest",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Weekly Monday 7AM": {
+   "main": [
+    [
+     {
+      "node": "Read Harvest History",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Read Harvest History": {
+   "main": [
+    [
+     {
+      "node": "Aggregate Yield Stats",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Aggregate Yield Stats": {
+   "main": [
+    [
+     {
+      "node": "Yield Predictor AI",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Yield Predictor AI": {
+   "main": [
+    [
+     {
+      "node": "Send Yield Forecast",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Daily 7AM Equipment": {
+   "main": [
+    [
+     {
+      "node": "Read Equipment",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Read Equipment": {
+   "main": [
+    [
+     {
+      "node": "Find Due Maintenance",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Find Due Maintenance": {
+   "main": [
+    [
+     {
+      "node": "Send Maintenance Reminder",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  }
+ },
+ "settings": {
+  "executionOrder": "v1"
+ },
+ "pinData": {}
+}
